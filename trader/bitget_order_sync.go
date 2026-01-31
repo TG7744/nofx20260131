@@ -245,6 +245,102 @@ func (t *BitgetTrader) SyncOrdersFromBitget(traderID string, exchangeID string, 
 	}
 
 	logger.Infof("✅ Bitget order sync completed: %d new trades synced", syncedCount)
+	
+	if err := t.syncClosedPositionsFromBitget(traderID, exchangeID, exchangeType, st); err != nil {
+		logger.Infof("⚠️  Bitget closed position sync failed: %v", err)
+	}
+	return nil
+}
+
+func (t *BitgetTrader) syncClosedPositionsFromBitget(traderID string, exchangeID string, exchangeType string, st *store.Store) error {
+	if st == nil {
+		return fmt.Errorf("store is nil")
+	}
+
+	positionStore := st.Position()
+	lastClosedTime, err := positionStore.GetLastClosedPositionTime(traderID)
+	if err != nil {
+		return fmt.Errorf("failed to get last closed position time: %w", err)
+	}
+
+	startTime := time.UnixMilli(lastClosedTime)
+	logger.Infof("🔄 Syncing Bitget closed positions from: %s", startTime.Format(time.RFC3339))
+
+	records, err := t.GetClosedPnL(startTime, 100)
+	if err != nil {
+		return fmt.Errorf("failed to get closed pnl records: %w", err)
+	}
+
+	if len(records) == 0 {
+		return nil
+	}
+
+	toCreate := make([]store.ClosedPnLRecord, 0, len(records))
+	for _, record := range records {
+		symbol := market.Normalize(record.Symbol)
+		side := strings.ToUpper(record.Side)
+		switch side {
+		case "BUY", "LONG":
+			side = "LONG"
+		case "SELL", "SHORT":
+			side = "SHORT"
+		default:
+			continue
+		}
+
+		exitTimeMs := record.ExitTime.UTC().UnixMilli()
+		entryTimeMs := record.EntryTime.UTC().UnixMilli()
+		openPos, err := positionStore.GetOpenPositionBySymbol(traderID, symbol, side)
+		if err != nil {
+			logger.Infof("  ⚠️ Failed to lookup open position for %s %s: %v", symbol, side, err)
+			continue
+		}
+
+		if openPos != nil {
+			if err := positionStore.ClosePositionWithAccurateData(
+				openPos.ID,
+				record.ExitPrice,
+				record.OrderID,
+				exitTimeMs,
+				record.RealizedPnL,
+				record.Fee,
+				record.CloseType,
+			); err != nil {
+				logger.Infof("  ⚠️ Failed to close position %s %s from Bitget history: %v", symbol, side, err)
+			} else {
+				logger.Infof("  ✅ Closed position from Bitget history: %s %s (exit %.4f, pnl %.4f)", symbol, side, record.ExitPrice, record.RealizedPnL)
+			}
+			continue
+		}
+
+		toCreate = append(toCreate, store.ClosedPnLRecord{
+			Symbol:      symbol,
+			Side:        side,
+			EntryPrice:  record.EntryPrice,
+			ExitPrice:   record.ExitPrice,
+			Quantity:    record.Quantity,
+			RealizedPnL: record.RealizedPnL,
+			Fee:         record.Fee,
+			Leverage:    record.Leverage,
+			EntryTime:   entryTimeMs,
+			ExitTime:    exitTimeMs,
+			OrderID:     record.OrderID,
+			CloseType:   record.CloseType,
+			ExchangeID:  record.ExchangeID,
+		})
+	}
+
+	if len(toCreate) == 0 {
+		return nil
+	}
+
+	created, skipped, err := positionStore.SyncClosedPositions(traderID, exchangeID, exchangeType, toCreate)
+	if err != nil {
+		return err
+	}
+
+	logger.Infof("✅ Bitget closed position sync completed: %d created, %d skipped", created, skipped)
+
 	return nil
 }
 
