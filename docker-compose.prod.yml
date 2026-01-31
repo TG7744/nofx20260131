@@ -10,7 +10,7 @@
 
 services:
   nofx:
-    image: ghcr.io/nofxaios/nofx/nofx-backend:latest
+    image: small147/nofx-backend:custom20230131lishi
     container_name: nofx-trading
     restart: unless-stopped
     stop_grace_period: 30s
